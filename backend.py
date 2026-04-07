@@ -1,5 +1,14 @@
 import pandas as pd
 import numpy as np
+import google.generativeai as genai
+import os
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# Configure Gemini - USE ENVIRONMENT VARIABLE
+genai.configure(api_key=os.getenv("AIzaSyCbtuubmQO00E-1hfMcmZXBbkyKci6hKn0"))
+model = genai.GenerativeModel('gemini-pro')
 
 class DataPrepEnv:
     def __init__(self, df):
@@ -8,14 +17,12 @@ class DataPrepEnv:
     def get_issues(self):
         missing = self.df.isnull().sum().sum()
         numeric_df = self.df.select_dtypes(include=[np.number])
-
         if not numeric_df.empty:
             negative = (numeric_df < 0).sum().sum()
             outliers = (numeric_df > 100).sum().sum()
         else:
             negative = 0
             outliers = 0
-
         return {"missing": missing, "negative": negative, "outliers": outliers}
 
     def get_score(self):
@@ -37,18 +44,15 @@ class DataPrepEnv:
         self.df = self.df.dropna()
 
     def fix_negative(self):
-        num_cols = self.df.select_dtypes(include=[np.number]).columns
-        for col in num_cols:
+        for col in self.df.select_dtypes(include=[np.number]).columns:
             self.df[col] = np.where(self.df[col] < 0, 0, self.df[col])
 
     def cap_outliers(self):
-        num_cols = self.df.select_dtypes(include=[np.number]).columns
-        for col in num_cols:
+        for col in self.df.select_dtypes(include=[np.number]).columns:
             self.df[col] = np.where(self.df[col] > 100, 100, self.df[col])
 
     def step(self, action):
         old_score = self.get_score()
-
         if action == "fill_missing_mean":
             self.fill_missing_mean()
         elif action == "fill_missing_mode":
@@ -59,63 +63,80 @@ class DataPrepEnv:
             self.fix_negative()
         elif action == "cap_outliers":
             self.cap_outliers()
-
         new_score = self.get_score()
-        reward = new_score - old_score
+        return self.df, new_score - old_score, old_score, new_score
 
-        return self.df, reward, old_score, new_score
-
-
-class AutoAgent:
+class GeminiAgent:
     def __init__(self, env):
         self.env = env
-        self.actions = [
-            "fill_missing_mean",
-            "fill_missing_mode",
-            "remove_rows",
-            "fix_negative",
-            "cap_outliers"
-        ]
+        self.actions = ["fill_missing_mean", "fill_missing_mode", "remove_rows", "fix_negative", "cap_outliers"]
 
-    def take_best_action(self):
-        best_reward = -float('inf')
-        best_action = None
-
-        # Try all actions on a copy
-        for action in self.actions:
-            env_copy = DataPrepEnv(self.env.df.copy())
-            _, reward, _, _ = env_copy.step(action)
-
-            if reward > best_reward:
-                best_reward = reward
-                best_action = action
-
-        # Stop if no improvement
-        if best_reward <= 0:
-            return None, 0
-
-        # Apply best action to real environment
-        _, actual_reward, _, _ = self.env.step(best_action)
-        return best_action, actual_reward
+    def get_action(self):
+        issues = self.env.get_issues()
+        
+        # Rule-based first (faster)
+        if issues['negative'] > 0:
+            return "fix_negative"
+        if issues['outliers'] > 0:
+            return "cap_outliers"
+        if issues['missing'] > 0:
+            return "fill_missing_mean"
+            
+        # Gemini for complex cases
+        try:
+            prompt = f"Missing:{issues['missing']} Negative:{issues['negative']} Outliers:{issues['outliers']} Score:{self.env.get_score()}. Choose: fill_missing_mean, fill_missing_mode, remove_rows, fix_negative, cap_outliers. Reply only action name:"
+            response = model.generate_content(prompt, timeout=3)
+            action = response.text.strip().strip('"').strip("'")
+            if action in self.actions:
+                return action
+        except:
+            pass
+        return None
 
     def run(self):
         steps = []
-
-        while True:
+        for _ in range(5):
             old_score = self.env.get_score()
-
-            best_action, reward = self.take_best_action()
-            if not best_action:
+            action = self.get_action()
+            if not action:
                 break
-
-            new_score = self.env.get_score()
-
-            # ✅ FIX: return structured dict instead of string
-            steps.append({
-                "action": best_action,
-                "reward": reward,
-                "old_score": old_score,
-                "new_score": new_score
-            })
-
+            _, reward, _, new_score = self.env.step(action)
+            steps.append({"action": action, "reward": reward, "old_score": old_score, "new_score": new_score})
+            if reward <= 0:
+                break
         return steps
+
+@app.route('/clean', methods=['POST'])
+def clean_uploaded_file():
+    try:
+        file = request.files['file']
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(file)
+        elif file.filename.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file)
+        else:
+            return jsonify({"error": "Only CSV and Excel files allowed"}), 400
+        
+        original_shape = df.shape
+        env = DataPrepEnv(df)
+        agent = GeminiAgent(env)
+        steps = agent.run()
+        
+        cleaned_json = env.df.replace({np.nan: None}).to_dict(orient='records')
+        
+        return jsonify({
+            "success": True,
+            "original_rows": original_shape[0],
+            "original_cols": original_shape[1],
+            "cleaned_rows": env.df.shape[0],
+            "cleaned_cols": env.df.shape[1],
+            "actions": steps,
+            "cleaned_data": cleaned_json,
+            "final_score": env.get_score()
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)

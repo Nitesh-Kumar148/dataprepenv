@@ -8,7 +8,7 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-# Put your API key here
+# REPLACE WITH YOUR ACTUAL API KEY
 genai.configure(api_key="AIzaSyCbtuubmQO00E-1hfMcmZXBbkyKci6hKn0")
 model = genai.GenerativeModel('gemini-pro')
 
@@ -112,8 +112,10 @@ def clean_uploaded_file():
         file = request.files['file']
         if file.filename.endswith('.csv'):
             df = pd.read_csv(file)
+        elif file.filename.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file)
         else:
-            return jsonify({"error": "Only CSV files allowed"}), 400
+            return jsonify({"error": "Only CSV and Excel files allowed"}), 400
         
         env = DataPrepEnv(df)
         agent = GeminiAgent(env)

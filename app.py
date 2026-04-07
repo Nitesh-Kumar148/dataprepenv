@@ -1,137 +1,137 @@
-import streamlit as st
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 import numpy as np
+import google.generativeai as genai
+import os
 
-# -------------------------------
-# PAGE CONFIG
-# -------------------------------
-st.set_page_config(page_title="AI Data Cleaning", layout="wide")
+app = Flask(__name__)
+CORS(app)  # Enable CORS for Streamlit
 
-# -------------------------------
-# STYLING
-# -------------------------------
-st.markdown("""
-    <style>
-    .stMetric {
-        background-color: #1e1e1e;
-        padding: 10px;
-        border-radius: 10px;
-        text-align: center;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
+model = genai.GenerativeModel('gemini-pro')
 
-# -------------------------------
-# TITLE
-# -------------------------------
-st.title("🧠 AI Data Cleaning Environment")
+class DataPrepEnv:
+    def __init__(self, df):
+        self.df = df.copy()
 
-# -------------------------------
-# FILE UPLOAD
-# -------------------------------
-st.subheader("📂 Upload Your Dataset")
-uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+    def get_issues(self):
+        missing = self.df.isnull().sum().sum()
+        numeric_df = self.df.select_dtypes(include=[np.number])
+        if not numeric_df.empty:
+            negative = (numeric_df < 0).sum().sum()
+            outliers = (numeric_df > 100).sum().sum()
+        else:
+            negative = 0
+            outliers = 0
+        return {"missing": missing, "negative": negative, "outliers": outliers}
 
-if uploaded_file is not None:
+    def get_score(self):
+        issues = self.get_issues()
+        return -(issues["missing"] * 2 + issues["negative"] * 3 + issues["outliers"] * 2)
 
-    # ✅ SESSION STATE FIX
-    if "df" not in st.session_state:
-        st.session_state.df = pd.read_csv(uploaded_file)
+    def fill_missing_mean(self):
+        numeric_df = self.df.select_dtypes(include=[np.number])
+        if not numeric_df.empty:
+            self.df[numeric_df.columns] = numeric_df.fillna(numeric_df.mean())
 
-    df = st.session_state.df
+    def fill_missing_mode(self):
+        for col in self.df.columns:
+            mode_series = self.df[col].mode()
+            if not mode_series.empty:
+                self.df[col] = self.df[col].fillna(mode_series[0])
 
-    # -------------------------------
-    # ISSUE DETECTION
-    # -------------------------------
-    def detect_issues(df):
-        missing = df.isnull().sum().sum()
-        negative = (df.select_dtypes(include=[np.number]) < 0).sum().sum()
-        outliers = (df.select_dtypes(include=[np.number]) > 100).sum().sum()
-        return {
-            "missing": int(missing),
-            "negative": int(negative),
-            "outliers": int(outliers)
-        }
+    def remove_rows(self):
+        self.df = self.df.dropna()
 
-    issues = detect_issues(df)
+    def fix_negative(self):
+        for col in self.df.select_dtypes(include=[np.number]).columns:
+            self.df[col] = np.where(self.df[col] < 0, 0, self.df[col])
 
-    # -------------------------------
-    # SCORE
-    # -------------------------------
-    score = 100 - (issues["missing"] * 2 + issues["negative"] * 3 + issues["outliers"] * 2)
-    score = max(score, 0)
+    def cap_outliers(self):
+        for col in self.df.select_dtypes(include=[np.number]).columns:
+            self.df[col] = np.where(self.df[col] > 100, 100, self.df[col])
 
-    # -------------------------------
-    # METRICS
-    # -------------------------------
-    st.subheader("📊 Data Quality Overview")
+    def step(self, action):
+        old_score = self.get_score()
+        if action == "fill_missing_mean":
+            self.fill_missing_mean()
+        elif action == "fill_missing_mode":
+            self.fill_missing_mode()
+        elif action == "remove_rows":
+            self.remove_rows()
+        elif action == "fix_negative":
+            self.fix_negative()
+        elif action == "cap_outliers":
+            self.cap_outliers()
+        new_score = self.get_score()
+        return self.df, new_score - old_score, old_score, new_score
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Missing Values", issues["missing"])
-    col2.metric("Errors", issues["negative"] + issues["outliers"])
-    col3.metric("Score", score)
+class GeminiAgent:
+    def __init__(self, env):
+        self.env = env
+        self.actions = ["fill_missing_mean", "fill_missing_mode", "remove_rows", "fix_negative", "cap_outliers"]
 
-    # -------------------------------
-    # CHART
-    # -------------------------------
-    chart_data = pd.DataFrame({
-        "Category": ["Missing", "Errors"],
-        "Count": [issues["missing"], issues["negative"] + issues["outliers"]]
-    })
+    def get_action(self):
+        issues = self.env.get_issues()
+        
+        if issues['negative'] > 0:
+            return "fix_negative"
+        if issues['outliers'] > 0:
+            return "cap_outliers"
+        if issues['missing'] > 0:
+            return "fill_missing_mean"
+            
+        try:
+            prompt = f"Missing:{issues['missing']} Negative:{issues['negative']} Outliers:{issues['outliers']} Score:{self.env.get_score()}. Choose: fill_missing_mean, fill_missing_mode, remove_rows, fix_negative, cap_outliers. Reply only action name:"
+            response = model.generate_content(prompt, timeout=3)
+            action = response.text.strip().strip('"').strip("'")
+            if action in self.actions:
+                return action
+        except:
+            pass
+        return None
 
-    st.bar_chart(chart_data.set_index("Category"))
+    def run(self):
+        steps = []
+        for _ in range(5):
+            old_score = self.env.get_score()
+            action = self.get_action()
+            if not action:
+                break
+            _, reward, _, new_score = self.env.step(action)
+            steps.append({"action": action, "reward": reward, "old_score": old_score, "new_score": new_score})
+            if reward <= 0:
+                break
+        return steps
 
-    # -------------------------------
-    # ACTIONS
-    # -------------------------------
-    st.subheader("⚙️ Cleaning Actions")
+@app.route('/clean', methods=['POST'])
+def clean_uploaded_file():
+    try:
+        file = request.files['file']
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(file)
+        elif file.filename.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file)
+        else:
+            return jsonify({"error": "Only CSV and Excel files allowed"}), 400
+        
+        env = DataPrepEnv(df)
+        agent = GeminiAgent(env)
+        steps = agent.run()
+        
+        cleaned_json = env.df.replace({np.nan: None}).to_dict(orient='records')
+        
+        return jsonify({
+            "success": True,
+            "actions": steps,
+            "cleaned_data": cleaned_json,
+            "final_score": env.get_score()
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    action = st.selectbox("Choose Action", [
-        "None",
-        "Fill Missing (Mean)",
-        "Remove Negative Values",
-        "Remove Outliers"
-    ])
-
-    if st.button("Apply Action"):
-
-        if action == "Fill Missing (Mean)":
-            df.fillna(df.mean(numeric_only=True), inplace=True)
-
-        elif action == "Remove Negative Values":
-            num_cols = df.select_dtypes(include=[np.number]).columns
-            df[num_cols] = df[num_cols].clip(lower=0)
-
-        elif action == "Remove Outliers":
-            num_cols = df.select_dtypes(include=[np.number]).columns
-            df[num_cols] = df[num_cols].clip(upper=100)
-
-        # ✅ SAVE CHANGES
-        st.session_state.df = df
-
-        st.success("✅ Action Applied Successfully!")
-
-    # -------------------------------
-    # AI AUTO CLEAN
-    # -------------------------------
-    if st.button("🤖 Run AI Auto Clean"):
-
-        df.fillna(df.mean(numeric_only=True), inplace=True)
-
-        num_cols = df.select_dtypes(include=[np.number]).columns
-        df[num_cols] = df[num_cols].clip(lower=0)
-        df[num_cols] = df[num_cols].clip(upper=100)
-
-        # ✅ SAVE CHANGES
-        st.session_state.df = df
-
-        st.success("🤖 AI cleaned the dataset automatically!")
-
-    # -------------------------------
-    # DISPLAY DATA
-    # -------------------------------
-    st.subheader("📈 Cleaned Dataset")
-    st.dataframe(st.session_state.df, use_container_width=True)
-
-else:
-    st.info("👆 Please upload a CSV file to start")
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)

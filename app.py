@@ -9,7 +9,7 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for Streamlit
 
 # Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
+genai.configure(api_key=os.getenv("AIzaSyCbtuubmQO00E-1hfMcmZXBbkyKci6hKn0"))
 model = genai.GenerativeModel('gemini-pro')
 
 class DataPrepEnv:

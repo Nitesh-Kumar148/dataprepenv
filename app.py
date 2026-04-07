@@ -139,6 +139,10 @@ if uploaded_file is not None:
 
     env = st.session_state.env
 
+    # ✅ FIX: Compute issues and score BEFORE using them in the metrics card
+    issues = env.get_issues()
+    score = env.get_score()
+
     # ----------------------------
     # Top Metrics
     # ----------------------------
@@ -253,7 +257,7 @@ else:
             <div style="display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 20px; border-radius: 15px; margin: 10px;">
                 🤖 <strong>AI Agent:</strong> Automatically clean your data
             </div>
-            <div style="display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 20px; border-radius: 15px; margin: 10px;">
+            <div style="display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 20px; border-radius, 15px; margin: 10px;">
                 📊 <strong>Real-time Metrics:</strong> Track data quality improvements
             </div>
             <div style="display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 20px; border-radius: 15px; margin: 10px;">
